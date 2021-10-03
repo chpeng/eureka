@@ -16,28 +16,9 @@
 
 package com.netflix.eureka.registry;
 
-import javax.annotation.Nullable;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Date;
-import java.util.List;
-import java.util.TimerTask;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.zip.GZIPOutputStream;
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
-import com.google.common.cache.RemovalListener;
-import com.google.common.cache.RemovalNotification;
+import com.google.common.cache.*;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.netflix.appinfo.EurekaAccept;
@@ -56,6 +37,17 @@ import com.netflix.servo.monitor.Stopwatch;
 import com.netflix.servo.monitor.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * The class that is responsible for caching registry information that will be
@@ -128,8 +120,12 @@ public class ResponseCacheImpl implements ResponseCache {
 
         long responseCacheUpdateIntervalMs = serverConfig.getResponseCacheUpdateIntervalMs();
         this.readWriteCacheMap =
-                CacheBuilder.newBuilder().initialCapacity(1000)
+                CacheBuilder.newBuilder()
+                        // 设置容量大小时1000
+                        .initialCapacity(1000)
+                        // 每隔180s 过期策略，这个是定时过期，每个180s
                         .expireAfterWrite(serverConfig.getResponseCacheAutoExpirationInSeconds(), TimeUnit.SECONDS)
+                        // 删除操作的监听
                         .removalListener(new RemovalListener<Key, Value>() {
                             @Override
                             public void onRemoval(RemovalNotification<Key, Value> notification) {
@@ -147,16 +143,20 @@ public class ResponseCacheImpl implements ResponseCache {
                                     Key cloneWithNoRegions = key.cloneWithoutRegions();
                                     regionSpecificKeys.put(cloneWithNoRegions, key);
                                 }
+                                // 生成缓存数据，从注册表中生成缓存数据
                                 Value value = generatePayload(key);
                                 return value;
                             }
                         });
 
+        //  定时任务，每个30s从 读写缓存中，更新缓存数据，所有，如果开启了这个，会有最多30秒的时间，服务不可见
         if (shouldUseReadOnlyResponseCache) {
-            timer.schedule(getCacheUpdateTask(),
-                    new Date(((System.currentTimeMillis() / responseCacheUpdateIntervalMs) * responseCacheUpdateIntervalMs)
-                            + responseCacheUpdateIntervalMs),
-                    responseCacheUpdateIntervalMs);
+            timer.schedule(
+                    getCacheUpdateTask(), // 从读写缓存中，获取数据，更新只读缓存
+                    new Date(((System.currentTimeMillis() / responseCacheUpdateIntervalMs) * responseCacheUpdateIntervalMs)+ responseCacheUpdateIntervalMs),
+                    responseCacheUpdateIntervalMs // 30s
+
+            );
         }
 
         try {
@@ -178,8 +178,11 @@ public class ResponseCacheImpl implements ResponseCache {
                     }
                     try {
                         CurrentRequestVersion.set(key.getVersion());
+                        // 获取读写缓存中的缓存数据
                         Value cacheValue = readWriteCacheMap.get(key);
+                        // 获取只读缓存中的缓存数据
                         Value currentCacheValue = readOnlyCacheMap.get(key);
+                        //  如果不等，则将读写缓存中的数据，更新到只读缓存中
                         if (cacheValue != currentCacheValue) {
                             readOnlyCacheMap.put(key, cacheValue);
                         }
@@ -204,12 +207,17 @@ public class ResponseCacheImpl implements ResponseCache {
      * @return payload which contains information about the applications.
      */
     public String get(final Key key) {
+        //  获取缓存，shouldUseReadOnlyResponseCache 默认是true
         return get(key, shouldUseReadOnlyResponseCache);
     }
 
     @VisibleForTesting
     String get(final Key key, boolean useReadOnlyCache) {
+
+        // 从缓存里获取数据
         Value payload = getValue(key, useReadOnlyCache);
+
+        // 返回对应的结果
         if (payload == null || payload.getPayload().equals(EMPTY_PAYLOAD)) {
             return null;
         } else {
@@ -241,8 +249,10 @@ public class ResponseCacheImpl implements ResponseCache {
      */
     @Override
     public void invalidate(String appName, @Nullable String vipAddress, @Nullable String secureVipAddress) {
+
         for (Key.KeyType type : Key.KeyType.values()) {
             for (Version v : Version.values()) {
+                //  调用失效方法，将缓存失效
                 invalidate(
                         new Key(Key.EntityType.Application, appName, type, v, EurekaAccept.full),
                         new Key(Key.EntityType.Application, appName, type, v, EurekaAccept.compact),
@@ -271,7 +281,9 @@ public class ResponseCacheImpl implements ResponseCache {
             logger.debug("Invalidating the response cache key : {} {} {} {}, {}",
                     key.getEntityType(), key.getName(), key.getVersion(), key.getType(), key.getEurekaAccept());
 
+            // 让读写缓存失效，这个是主动试下，在出入注册 、删除、状态变革 下线都会主动失效
             readWriteCacheMap.invalidate(key);
+
             Collection<Key> keysWithRegions = regionSpecificKeys.get(key);
             if (null != keysWithRegions && !keysWithRegions.isEmpty()) {
                 for (Key keysWithRegion : keysWithRegions) {
@@ -345,11 +357,17 @@ public class ResponseCacheImpl implements ResponseCache {
         Value payload = null;
         try {
             if (useReadOnlyCache) {
+
+                // 1. 先从readOnlyCacheMap 中获取 （ConcurrentMap）
                 final Value currentPayload = readOnlyCacheMap.get(key);
                 if (currentPayload != null) {
                     payload = currentPayload;
                 } else {
+                    // 2. 如果只读缓存中没有值，则从读写缓存中获取（LoadingCache）,如果读写缓存中没有值得话，会从注册表中重新拉取数据
+                    //  readWriteCacheMap 是 LoadingCache 这个是guava的类，调用get方法，如果没有值，会直接从CacheLoader.load方法
+                    // 可以直接通过key获取缓存中的数据，不需要添加function，如果cache中没有存该key，会通过配置的CacheLoad加载key的值。
                     payload = readWriteCacheMap.get(key);
+                    // 取出值后，将值放入到只读缓存中去
                     readOnlyCacheMap.put(key, payload);
                 }
             } else {
@@ -408,11 +426,13 @@ public class ResponseCacheImpl implements ResponseCache {
                     boolean isRemoteRegionRequested = key.hasRegions();
 
                     if (ALL_APPS.equals(key.getName())) {
+                        //
                         if (isRemoteRegionRequested) {
                             tracer = serializeAllAppsWithRemoteRegionTimer.start();
                             payload = getPayLoad(key, registry.getApplicationsFromMultipleRegions(key.getRegions()));
                         } else {
                             tracer = serializeAllAppsTimer.start();
+                            // 将key和注册表中的数据传入
                             payload = getPayLoad(key, registry.getApplications());
                         }
                     } else if (ALL_APPS_DELTA.equals(key.getName())) {

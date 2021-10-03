@@ -16,14 +16,18 @@
 
 package com.netflix.eureka.resources;
 
+import com.netflix.appinfo.EurekaAccept;
+import com.netflix.eureka.EurekaServerConfig;
+import com.netflix.eureka.EurekaServerContext;
+import com.netflix.eureka.EurekaServerContextHolder;
+import com.netflix.eureka.Version;
+import com.netflix.eureka.registry.*;
+import com.netflix.eureka.registry.Key.KeyType;
+import com.netflix.eureka.util.EurekaMonitors;
+
 import javax.annotation.Nullable;
 import javax.inject.Inject;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
+import javax.ws.rs.*;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -31,24 +35,13 @@ import javax.ws.rs.core.Response.Status;
 import javax.ws.rs.core.UriInfo;
 import java.util.Arrays;
 
-import com.netflix.appinfo.EurekaAccept;
-import com.netflix.eureka.EurekaServerContext;
-import com.netflix.eureka.EurekaServerContextHolder;
-import com.netflix.eureka.registry.AbstractInstanceRegistry;
-import com.netflix.eureka.EurekaServerConfig;
-import com.netflix.eureka.registry.PeerAwareInstanceRegistry;
-import com.netflix.eureka.Version;
-import com.netflix.eureka.registry.ResponseCache;
-import com.netflix.eureka.registry.Key.KeyType;
-import com.netflix.eureka.registry.ResponseCacheImpl;
-import com.netflix.eureka.registry.Key;
-import com.netflix.eureka.util.EurekaMonitors;
-
 /**
  * A <em>jersey</em> resource that handles request related to all
  * {@link com.netflix.discovery.shared.Applications}.
  *
  * @author Karthik Ranganathan, Greg Kim
+ *
+ * 类似spring mvc的controller
  *
  */
 @Path("/{version}/apps")
@@ -90,6 +83,7 @@ public class ApplicationsResource {
     public ApplicationResource getApplicationResource(
             @PathParam("version") String version,
             @PathParam("appId") String appId) {
+        // 处理注册请求的
         CurrentRequestVersion.set(Version.toEnum(version));
         return new ApplicationResource(appId, serverConfig, registry);
     }
@@ -108,6 +102,7 @@ public class ApplicationsResource {
      *
      * @return a response containing information about all {@link com.netflix.discovery.shared.Applications}
      *         from the {@link AbstractInstanceRegistry}.
+     *         这个方法，是获取所有服务的的接口
      */
     @GET
     public Response getContainers(@PathParam("version") String version,
@@ -119,6 +114,7 @@ public class ApplicationsResource {
 
         boolean isRemoteRegionRequested = null != regionsStr && !regionsStr.isEmpty();
         String[] regions = null;
+        // 全量的时候 regionsStr是空的，所以 isRemoteRegionRequested = false
         if (!isRemoteRegionRequested) {
             EurekaMonitors.GET_ALL.increment();
         } else {
@@ -141,7 +137,8 @@ public class ApplicationsResource {
             returnMediaType = MediaType.APPLICATION_XML;
         }
 
-        Key cacheKey = new Key(Key.EntityType.Application,
+        Key cacheKey = new Key(
+                Key.EntityType.Application,
                 ResponseCacheImpl.ALL_APPS,
                 keyType, CurrentRequestVersion.get(), EurekaAccept.fromString(eurekaAccept), regions
         );
@@ -153,6 +150,7 @@ public class ApplicationsResource {
                     .header(HEADER_CONTENT_TYPE, returnMediaType)
                     .build();
         } else {
+            // 全量获取走的是这个方法
             response = Response.ok(responseCache.get(cacheKey))
                     .build();
         }

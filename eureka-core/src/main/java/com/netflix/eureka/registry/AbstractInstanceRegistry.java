@@ -16,30 +16,6 @@
 
 package com.netflix.eureka.registry;
 
-import javax.annotation.Nullable;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Random;
-import java.util.Set;
-import java.util.Timer;
-import java.util.TimerTask;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-
 import com.google.common.cache.CacheBuilder;
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.appinfo.InstanceInfo.ActionType;
@@ -57,6 +33,20 @@ import com.netflix.eureka.util.MeasuredRate;
 import com.netflix.servo.annotations.DataSourceType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.*;
+import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import static com.netflix.eureka.util.EurekaMonitors.*;
 
@@ -76,6 +66,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     private static final Logger logger = LoggerFactory.getLogger(AbstractInstanceRegistry.class);
 
     private static final String[] EMPTY_STR_ARRAY = new String[0];
+    // 这个是服务注册表，基于内存的ConcurrentHashMap 做的
     private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry
             = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
     protected Map<String, RemoteRegionRegistry> regionNameVSRemoteRegistry = new HashMap<String, RemoteRegionRegistry>();
@@ -100,6 +91,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
     private final AtomicReference<EvictionTask> evictionTaskRef = new AtomicReference<EvictionTask>();
 
+    // 猜测，保存所有的服务新西
     protected String[] allKnownRemoteRegions = EMPTY_STR_ARRAY;
     protected volatile int numberOfRenewsPerMinThreshold;
     protected volatile int expectedNumberOfRenewsPerMin;
@@ -184,6 +176,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         return new HashMap<>(overriddenInstanceStatusMap);
     }
 
+
     /**
      * Registers a new instance with a given duration.
      *
@@ -191,9 +184,31 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
      */
     public void register(InstanceInfo registrant, int leaseDuration, boolean isReplication) {
         try {
+            // 加读锁，读锁如果，成功后，写锁是不能添加成功的
             read.lock();
+
+
+            // 注册表结构
+            /*
+            {
+                "serviceA":{
+                    "INS_A_001":Lease<InstanceInfo>,
+                    "INS_A_003":Lease<InstanceInfo>,
+                    "INS_A_002":Lease<InstanceInfo>,
+                },
+                "serviceB":{
+                    "INS_B_001":Lease<InstanceInfo>,
+                    "INS_B_003":Lease<InstanceInfo>,
+                    "INS_B_002":Lease<InstanceInfo>,
+                }
+
+            }
+             */
+
+            // 从注册表中通过服务名称，获取该服务对应的实例
             Map<String, Lease<InstanceInfo>> gMap = registry.get(registrant.getAppName());
             REGISTER.increment(isReplication);
+            // 如果为空，说明，这个服务registrant.getAppName() 还没有进行过注册，创建一个map,用于保存该服务的注册信息
             if (gMap == null) {
                 final ConcurrentHashMap<String, Lease<InstanceInfo>> gNewMap = new ConcurrentHashMap<String, Lease<InstanceInfo>>();
                 gMap = registry.putIfAbsent(registrant.getAppName(), gNewMap);
@@ -201,6 +216,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                     gMap = gNewMap;
                 }
             }
+            // 冲实例map中获取对应的实例信息，如果是第一次注册，此时的existingLease应该是空的
             Lease<InstanceInfo> existingLease = gMap.get(registrant.getId());
             // Retain the last dirty timestamp without overwriting it, if there is already a lease
             if (existingLease != null && (existingLease.getHolder() != null)) {
@@ -218,6 +234,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 }
             } else {
                 // The lease does not exist and hence it is a new registration
+                // 第一次服务注册是信息
                 synchronized (lock) {
                     if (this.expectedNumberOfRenewsPerMin > 0) {
                         // Since the client wants to cancel it, reduce the threshold
@@ -230,12 +247,16 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 }
                 logger.debug("No previous lease information found; it is new registration");
             }
+            // 将实例信息封装成一个lease对象
             Lease<InstanceInfo> lease = new Lease<InstanceInfo>(registrant, leaseDuration);
             if (existingLease != null) {
                 lease.setServiceUpTimestamp(existingLease.getServiceUpTimestamp());
             }
+            // 将当前服务实例的id为key保存的hashmap中
             gMap.put(registrant.getId(), lease);
+
             synchronized (recentRegisteredQueue) {
+                //  将 《当前时间，实例的id》,作为一个pair保存到队列中去。
                 recentRegisteredQueue.add(new Pair<Long, String>(
                         System.currentTimeMillis(),
                         registrant.getAppName() + "(" + registrant.getId() + ")"));
@@ -249,6 +270,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                     overriddenInstanceStatusMap.put(registrant.getId(), registrant.getOverriddenStatus());
                 }
             }
+
+            // 实例的状态信息
             InstanceStatus overriddenStatusFromMap = overriddenInstanceStatusMap.get(registrant.getId());
             if (overriddenStatusFromMap != null) {
                 logger.info("Storing overridden status {} from map", overriddenStatusFromMap);
@@ -265,8 +288,12 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             }
             registrant.setActionType(ActionType.ADDED);
             recentlyChangedQueue.add(new RecentlyChangedItem(lease));
+            // 设置最新的更新时间
             registrant.setLastUpdatedTimestamp();
+
+            // 让缓存失效
             invalidateCache(registrant.getAppName(), registrant.getVIPAddress(), registrant.getSecureVipAddress());
+
             logger.info("Registered instance {}/{} with status {} (replication={})",
                     registrant.getAppName(), registrant.getId(), registrant.getStatus(), isReplication);
         } finally {
@@ -693,6 +720,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         if (disableTransparentFallback) {
             return getApplicationsFromLocalRegionOnly();
         } else {
+            // 获取所有的服务信息
             return getApplicationsFromAllRemoteRegions();  // Behavior of falling back to remote region can be disabled.
         }
     }
@@ -745,19 +773,25 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         }
         Applications apps = new Applications();
         apps.setVersion(1L);
+        // 循环注册表里的的实例信息
         for (Entry<String, Map<String, Lease<InstanceInfo>>> entry : registry.entrySet()) {
             Application app = null;
-
+            // entry 应该是 所有的服务信息
             if (entry.getValue() != null) {
+                // 循环单个服务的所有实例信息
                 for (Entry<String, Lease<InstanceInfo>> stringLeaseEntry : entry.getValue().entrySet()) {
+                    // 拿到当前循环的服务中的实例
                     Lease<InstanceInfo> lease = stringLeaseEntry.getValue();
+                    // 如果当前服务的对象为空，则创建一个表示当前服务的对象Application
                     if (app == null) {
                         app = new Application(lease.getHolder().getAppName());
                     }
+                    // 将当前服务的实例保存到对应的服务的application中
                     app.addInstance(decorateInstanceInfo(lease));
                 }
             }
             if (app != null) {
+                // 将当前的服务，添加到保存所有服务的application中
                 apps.addApplication(app);
             }
         }
@@ -1195,8 +1229,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         return list;
     }
 
+    // 让读写缓存失效，这个是主动试下，在出入注册 、删除、状态变革 下线都会主动失效
     private void invalidateCache(String appName, @Nullable String vipAddress, @Nullable String secureVipAddress) {
-        // invalidate cache
+        // invalidate cache 让responseCache 缓存失效
         responseCache.invalidate(appName, vipAddress, secureVipAddress);
     }
 
