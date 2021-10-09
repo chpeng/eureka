@@ -15,12 +15,12 @@
  */
 package com.netflix.eureka.util;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicLong;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Utility class for getting a count in last X milliseconds.
@@ -47,6 +47,8 @@ public class MeasuredRate {
     }
 
     public synchronized void start() {
+
+        // 每一分钟清以此
         if (!isActive) {
             timer.schedule(new TimerTask() {
 

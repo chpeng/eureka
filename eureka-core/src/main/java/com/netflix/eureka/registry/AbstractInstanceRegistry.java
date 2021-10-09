@@ -245,6 +245,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                         // Since the client wants to cancel it, reduce the threshold
                         // (1
                         // for 30 seconds, 2 for a minute)
+                        // 每增加一个实例，心跳次数加2
                         this.expectedNumberOfRenewsPerMin = this.expectedNumberOfRenewsPerMin + 2;
                         this.numberOfRenewsPerMinThreshold =
                                 (int) (this.expectedNumberOfRenewsPerMin * serverConfig.getRenewalPercentThreshold());
@@ -641,6 +642,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     public void evict(long additionalLeaseMs) {
         logger.debug("Running the evict task");
 
+        // 是否开启启用租约到期，如果没有开启，直接返回,isLeaseExpirationEnabled 是false 则直接返回
         if (!isLeaseExpirationEnabled()) {
             logger.debug("DS: lease expiration is currently disabled.");
             return;
@@ -650,11 +652,13 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         // if we do not that, we might wipe out whole apps before self preservation kicks in. By randomizing it,
         // the impact should be evenly distributed across all applications.
         List<Lease<InstanceInfo>> expiredLeases = new ArrayList<>();
+        // 获取注册表的实例，将失效的实例放到失效集合中国
         for (Entry<String, Map<String, Lease<InstanceInfo>>> groupEntry : registry.entrySet()) {
             Map<String, Lease<InstanceInfo>> leaseMap = groupEntry.getValue();
             if (leaseMap != null) {
                 for (Entry<String, Lease<InstanceInfo>> leaseEntry : leaseMap.entrySet()) {
                     Lease<InstanceInfo> lease = leaseEntry.getValue();
+                    // 如果失效了，则把添加到失效集合中
                     if (lease.isExpired(additionalLeaseMs) && lease.getHolder() != null) {
                         expiredLeases.add(lease);
                     }
@@ -664,14 +668,19 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
         // To compensate for GC pauses or drifting local time, we need to use current registry size as a base for
         // triggering self-preservation. Without that we would wipe out full registry.
+        // 获取当前实例数量
         int registrySize = (int) getLocalRegistrySize();
+        // 实例数量 *  RenewalPercentThreshold 默认 0.85
         int registrySizeThreshold = (int) (registrySize * serverConfig.getRenewalPercentThreshold());
-        int evictionLimit = registrySize - registrySizeThreshold;
 
+        // 获取驱逐数量 (实例数量 - 实例数量 * 0.85)
+        int evictionLimit = registrySize - registrySizeThreshold;
+        // 从集合里面取最小值
         int toEvict = Math.min(expiredLeases.size(), evictionLimit);
+
         if (toEvict > 0) {
             logger.info("Evicting {} items (expired={}, evictionLimit={})", toEvict, expiredLeases.size(), evictionLimit);
-
+            // 随机下线
             Random random = new Random(System.currentTimeMillis());
             for (int i = 0; i < toEvict; i++) {
                 // Pick a random item (Knuth shuffle algorithm)
@@ -683,6 +692,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 String id = lease.getHolder().getId();
                 EXPIRED.increment();
                 logger.warn("DS: Registry: expired lease for {}/{}", appName, id);
+                // 故障摘除
                 internalCancel(appName, id, false);
             }
         }

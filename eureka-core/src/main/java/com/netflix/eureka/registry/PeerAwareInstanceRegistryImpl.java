@@ -136,7 +136,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         this.numberOfReplicationsLastMin.start();
         this.peerEurekaNodes = peerEurekaNodes;
         initializedResponseCache();
-        // 调度
+        // 调度定时更新 15 * 60 * 1000 每隔15分钟期望的心跳次数
         scheduleRenewalThresholdUpdateTask();
         initRemoteRegionRegistry();
 
@@ -194,6 +194,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         // Copy entire entry from neighboring DS node
         int count = 0;
 
+        // serverConfig.getRegistrySyncRetries() 重试次数
         for (int i = 0; ((i < serverConfig.getRegistrySyncRetries()) && (count == 0)); i++) {
             if (i > 0) {
                 try {
@@ -203,10 +204,12 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
                     break;
                 }
             }
+            // 获取其他server的实例信息
             Applications apps = eurekaClient.getApplications();
             for (Application app : apps.getRegisteredApplications()) {
                 for (InstanceInfo instance : app.getInstances()) {
                     try {
+                        //  如果没有在当前server注册，则注册
                         if (isRegisterable(instance)) {
                             register(instance, instance.getLeaseInfo().getDurationInSecs(), true);
                             count++;
@@ -223,6 +226,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     @Override
     public void openForTraffic(ApplicationInfoManager applicationInfoManager, int count) {
         // Renewals happen every 30 seconds and for a minute it should be a factor of 2.
+        // s实例数量 *  2
         this.expectedNumberOfRenewsPerMin = count * 2;
         this.numberOfRenewsPerMinThreshold =
                 (int) (this.expectedNumberOfRenewsPerMin * serverConfig.getRenewalPercentThreshold());
@@ -240,6 +244,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         }
         logger.info("Changing status to UP");
         applicationInfoManager.setInstanceStatus(InstanceStatus.UP);
+        // 启动服务
         super.postInit();
     }
 
@@ -369,6 +374,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
             synchronized (lock) {
                 if (this.expectedNumberOfRenewsPerMin > 0) {
                     // Since the client wants to cancel it, reduce the threshold (1 for 30 seconds, 2 for a minute)
+                    // 每下线一个实例心跳次数减2
                     this.expectedNumberOfRenewsPerMin = this.expectedNumberOfRenewsPerMin - 2;
                     this.numberOfRenewsPerMinThreshold =
                             (int) (this.expectedNumberOfRenewsPerMin * serverConfig.getRenewalPercentThreshold());
@@ -471,10 +477,17 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
 
     @Override
     public boolean isLeaseExpirationEnabled() {
+
+
+        // 是否启用自我保护模式，如果开启没有开启自我保护模式
+        // 自我保护模式 是 如果开启，则如果在一段时间内，所有实例发送的心跳数小于 预期的数量，则不摘除实例，原因可能是server服务网络问题
         if (!isSelfPreservationModeEnabled()) {
             // The self preservation mode is disabled, hence allowing the instances to expire.
             return true;
         }
+
+        // getNumOfRenewsInLastMin() 获取1min之内的所有实例的心跳次数，
+        // numberOfRenewsPerMinThreshold 期望发的此时
         return numberOfRenewsPerMinThreshold > 0 && getNumOfRenewsInLastMin() > numberOfRenewsPerMinThreshold;
     }
 

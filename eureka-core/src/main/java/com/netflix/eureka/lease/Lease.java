@@ -108,6 +108,9 @@ public class Lease<T> {
      * @param additionalLeaseMs any additional lease time to add to the lease evaluation in ms.
      */
     public boolean isExpired(long additionalLeaseMs) {
+
+        // evictionTimestamp 下线的时候，这个世界会更新
+        // 这个失效逻辑是 如果当前机器已下线 或者 当前时间 大于 最新的续约时间 + duration + additionalLeaseMs,则表示已经失效了
         return (evictionTimestamp > 0 || System.currentTimeMillis() > (lastUpdateTimestamp + duration + additionalLeaseMs));
     }
 
