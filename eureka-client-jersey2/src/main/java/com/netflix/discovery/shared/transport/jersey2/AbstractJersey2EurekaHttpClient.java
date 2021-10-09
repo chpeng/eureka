@@ -110,6 +110,8 @@ public abstract class AbstractJersey2EurekaHttpClient implements EurekaHttpClien
 
     @Override
     public EurekaHttpResponse<Void> cancel(String appName, String id) {
+        // http://192.168.0.1:8090/v2/apps/serverA/0001
+
         String urlPath = "apps/" + appName + '/' + id;
         Response response = null;
         try {
@@ -130,12 +132,17 @@ public abstract class AbstractJersey2EurekaHttpClient implements EurekaHttpClien
 
     @Override
     public EurekaHttpResponse<InstanceInfo> sendHeartBeat(String appName, String id, InstanceInfo info, InstanceStatus overriddenStatus) {
+
+        // http:// 192.168.1.1:8090/V2/apps/serverA/001
+
         String urlPath = "apps/" + appName + '/' + id;
         Response response = null;
         try {
             WebTarget webResource = jerseyClient.target(serviceUrl)
                     .path(urlPath)
+                    // 发送状态
                     .queryParam("status", info.getStatus().toString())
+                    // 发送最近一次的时间
                     .queryParam("lastDirtyTimestamp", info.getLastDirtyTimestamp().toString());
             if (overriddenStatus != null) {
                 webResource = webResource.queryParam("overriddenstatus", overriddenStatus.name());
@@ -144,7 +151,9 @@ public abstract class AbstractJersey2EurekaHttpClient implements EurekaHttpClien
             addExtraProperties(requestBuilder);
             addExtraHeaders(requestBuilder);
             requestBuilder.accept(MediaType.APPLICATION_JSON_TYPE);
+            // 使用put方法发送心跳
             response = requestBuilder.put(Entity.entity("{}", MediaType.APPLICATION_JSON_TYPE)); // Jersey2 refuses to handle PUT with no body
+
             EurekaHttpResponseBuilder<InstanceInfo> eurekaResponseBuilder = anEurekaHttpResponse(response.getStatus(), InstanceInfo.class).headers(headersOf(response));
             if (response.hasEntity()) {
                 eurekaResponseBuilder.entity(response.readEntity(InstanceInfo.class));
@@ -216,6 +225,8 @@ public abstract class AbstractJersey2EurekaHttpClient implements EurekaHttpClien
 
     @Override
     public EurekaHttpResponse<Applications> getDelta(String... regions) {
+        // http://192.168.1.1:8080/v2/apps/delta
+        // 使用的是get方法
         return getApplicationsInternal("apps/delta", regions);
     }
 

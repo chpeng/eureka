@@ -70,6 +70,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry
             = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
     protected Map<String, RemoteRegionRegistry> regionNameVSRemoteRegistry = new HashMap<String, RemoteRegionRegistry>();
+
+    // 保存实例状态的缓存
     protected final ConcurrentMap<String, InstanceStatus> overriddenInstanceStatusMap = CacheBuilder
             .newBuilder().initialCapacity(500)
             .expireAfterAccess(1, TimeUnit.HOURS)
@@ -78,6 +80,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     // CircularQueues here for debugging/statistics purposes only
     private final CircularQueue<Pair<Long, String>> recentRegisteredQueue;
     private final CircularQueue<Pair<Long, String>> recentCanceledQueue;
+
+    // 服务注册 下线 状态变更 都会加到这个队列中
     private ConcurrentLinkedQueue<RecentlyChangedItem> recentlyChangedQueue = new ConcurrentLinkedQueue<RecentlyChangedItem>();
 
     private final ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();
@@ -113,8 +117,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
         this.renewsLastMin = new MeasuredRate(1000 * 60 * 1);
 
+        // 初始定时任务，每隔  serverConfig.getDeltaRetentionTimerIntervalInMs() 时间调度一次，默认是30s
         this.deltaRetentionTimer.schedule(getDeltaRetentionTask(),
-                serverConfig.getDeltaRetentionTimerIntervalInMs(),
+                serverConfig.getDeltaRetentionTimerIntervalInMs(), // 30 * 1000 ms
                 serverConfig.getDeltaRetentionTimerIntervalInMs());
     }
 
@@ -287,6 +292,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 lease.serviceUp();
             }
             registrant.setActionType(ActionType.ADDED);
+            // 添加修改队列中
             recentlyChangedQueue.add(new RecentlyChangedItem(lease));
             // 设置最新的更新时间
             registrant.setLastUpdatedTimestamp();
@@ -329,14 +335,18 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         try {
             read.lock();
             CANCEL.increment(isReplication);
+            // 获取要取消的实例信息
             Map<String, Lease<InstanceInfo>> gMap = registry.get(appName);
             Lease<InstanceInfo> leaseToCancel = null;
             if (gMap != null) {
+                // 将这条实例信息从注册表中删除
                 leaseToCancel = gMap.remove(id);
             }
+            // 将下线的服务实例，添加到下线队列中
             synchronized (recentCanceledQueue) {
                 recentCanceledQueue.add(new Pair<Long, String>(System.currentTimeMillis(), appName + "(" + id + ")"));
             }
+            // 将状态从缓存中删除
             InstanceStatus instanceStatus = overriddenInstanceStatusMap.remove(id);
             if (instanceStatus != null) {
                 logger.debug("Removed instance id {} from the overridden map which has value {}", id, instanceStatus.name());
@@ -346,17 +356,24 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 logger.warn("DS: Registry: cancel failed because Lease is not registered for: {}/{}", appName, id);
                 return false;
             } else {
+                // 设置服务实例，下线的时间戳
                 leaseToCancel.cancel();
+
                 InstanceInfo instanceInfo = leaseToCancel.getHolder();
                 String vip = null;
                 String svip = null;
                 if (instanceInfo != null) {
+                    // 设置实例的状态为delete
                     instanceInfo.setActionType(ActionType.DELETED);
+                    // 将下线的实例，添加到最近变化的队列中
                     recentlyChangedQueue.add(new RecentlyChangedItem(leaseToCancel));
+                    // 设置更新时间
                     instanceInfo.setLastUpdatedTimestamp();
                     vip = instanceInfo.getVIPAddress();
                     svip = instanceInfo.getSecureVipAddress();
                 }
+
+                // 将缓存设置为失效
                 invalidateCache(appName, vip, svip);
                 logger.info("Cancelled instance {}/{} (replication={})", appName, id, isReplication);
                 return true;
@@ -371,10 +388,15 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
      * replication.
      *
      * @see com.netflix.eureka.lease.LeaseManager#renew(java.lang.String, java.lang.String, boolean)
+     *
+     * 续约
      */
     public boolean renew(String appName, String id, boolean isReplication) {
         RENEW.increment(isReplication);
+        // 从注册表中获取该服务的相关信息，所有的实例
         Map<String, Lease<InstanceInfo>> gMap = registry.get(appName);
+
+        // 用于保存当前要续约的的实例信息
         Lease<InstanceInfo> leaseToRenew = null;
         if (gMap != null) {
             leaseToRenew = gMap.get(id);
@@ -384,11 +406,15 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             logger.warn("DS: Registry: lease doesn't exist, registering resource: {} - {}", appName, id);
             return false;
         } else {
+            // 要续约的实例信息
             InstanceInfo instanceInfo = leaseToRenew.getHolder();
+
             if (instanceInfo != null) {
                 // touchASGCache(instanceInfo.getASGName());
+                // 覆盖更新的状态
                 InstanceStatus overriddenInstanceStatus = this.getOverriddenInstanceStatus(
                         instanceInfo, leaseToRenew, isReplication);
+
                 if (overriddenInstanceStatus == InstanceStatus.UNKNOWN) {
                     logger.info("Instance status UNKNOWN possibly due to deleted override for instance {}"
                             + "; re-register required", instanceInfo.getId());
@@ -407,7 +433,10 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                     instanceInfo.setStatusWithoutDirty(overriddenInstanceStatus);
                 }
             }
+            // 续约次数+1
             renewsLastMin.increment();
+
+            // 更新下次续约的时间，当前时间戳 + 下线时间
             leaseToRenew.renew();
             return true;
         }
@@ -1034,6 +1063,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 }
             }
 
+            // 最终调的是全量抓去的接口
             Applications allApps = getApplicationsFromMultipleRegions(remoteRegions);
             apps.setAppsHashCode(allApps.getReconcileHashCode());
             return apps;
@@ -1354,6 +1384,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                                                                     boolean isReplication) {
         InstanceStatusOverrideRule rule = getInstanceInfoOverrideRule();
         logger.debug("Processing override status using rule: {}", rule);
+        // 执行规则
         return rule.apply(r, existingLease, isReplication).status();
     }
 
@@ -1364,6 +1395,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             public void run() {
                 Iterator<RecentlyChangedItem> it = recentlyChangedQueue.iterator();
                 while (it.hasNext()) {
+                    // 如果当前时间减去 服务变化的时间 3 * 60 * 1000 3min 将这个数据，从队列中移除（就是说这个队列只保存最近3min中内的实例变化数据）
                     if (it.next().getLastUpdateTime() <
                             System.currentTimeMillis() - serverConfig.getRetentionTimeInMSInDeltaQueue()) {
                         it.remove();
