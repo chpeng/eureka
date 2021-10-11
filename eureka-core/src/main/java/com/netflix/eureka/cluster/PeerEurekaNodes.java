@@ -1,30 +1,25 @@
 package com.netflix.eureka.cluster;
 
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
-
 import com.netflix.appinfo.ApplicationInfoManager;
 import com.netflix.appinfo.InstanceInfo;
 import com.netflix.discovery.EurekaClientConfig;
 import com.netflix.discovery.endpoint.EndpointUtils;
-import com.netflix.discovery.shared.Application;
 import com.netflix.eureka.EurekaServerConfig;
 import com.netflix.eureka.registry.PeerAwareInstanceRegistry;
 import com.netflix.eureka.resources.ServerCodecs;
 import com.netflix.eureka.transport.JerseyReplicationClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.inject.Inject;
+import javax.inject.Singleton;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Helper class to manage lifecycle of a collection of {@link PeerEurekaNode}s.
@@ -42,6 +37,7 @@ public class PeerEurekaNodes {
     protected final ServerCodecs serverCodecs;
     private final ApplicationInfoManager applicationInfoManager;
 
+    // 保存所有想eureka server注册的实例信息
     private volatile List<PeerEurekaNode> peerEurekaNodes = Collections.emptyList();
     private volatile Set<String> peerEurekaNodeUrls = Collections.emptySet();
 
@@ -74,6 +70,8 @@ public class PeerEurekaNodes {
     }
 
     public void start() {
+
+        // 创建一个线程池
         taskExecutor = Executors.newSingleThreadScheduledExecutor(
                 new ThreadFactory() {
                     @Override
@@ -85,7 +83,11 @@ public class PeerEurekaNodes {
                 }
         );
         try {
+
+
             updatePeerEurekaNodes(resolvePeerUrls());
+
+            // 创建一个updatePeerEurekaNodes 任务，定时更新注册的服务的节点数据
             Runnable peersUpdateTask = new Runnable() {
                 @Override
                 public void run() {
@@ -97,9 +99,11 @@ public class PeerEurekaNodes {
 
                 }
             };
+
+            // 调度 updatePeerEurekaNodes 任务 每隔10min中
             taskExecutor.scheduleWithFixedDelay(
                     peersUpdateTask,
-                    serverConfig.getPeerEurekaNodesUpdateIntervalMs(),
+                    serverConfig.getPeerEurekaNodesUpdateIntervalMs(), // 10min
                     serverConfig.getPeerEurekaNodesUpdateIntervalMs(),
                     TimeUnit.MILLISECONDS
             );
@@ -127,15 +131,21 @@ public class PeerEurekaNodes {
      * Resolve peer URLs.
      *
      * @return peer URLs with node's own URL filtered out
+     *
+     * 获取所有eurakeserver的实例信息，排除掉自己
+     *
      */
     protected List<String> resolvePeerUrls() {
+
         InstanceInfo myInfo = applicationInfoManager.getInfo();
+        // 获取存活的server
         String zone = InstanceInfo.getZone(clientConfig.getAvailabilityZones(clientConfig.getRegion()), myInfo);
         List<String> replicaUrls = EndpointUtils
                 .getDiscoveryServiceUrls(clientConfig, zone, new EndpointUtils.InstanceInfoBasedUrlRandomizer(myInfo));
 
         int idx = 0;
         while (idx < replicaUrls.size()) {
+            // 排除自己
             if (isThisMyUrl(replicaUrls.get(idx))) {
                 replicaUrls.remove(idx);
             } else {
@@ -158,10 +168,14 @@ public class PeerEurekaNodes {
         }
 
         Set<String> toShutdown = new HashSet<>(peerEurekaNodeUrls);
+        // 剩下的就是需要关闭的服务信息
         toShutdown.removeAll(newPeerUrls);
+
         Set<String> toAdd = new HashSet<>(newPeerUrls);
+        // 剩下的就是需要更新的server
         toAdd.removeAll(peerEurekaNodeUrls);
 
+        // 说明没有改变，不需要更新，也不需要下线
         if (toShutdown.isEmpty() && toAdd.isEmpty()) { // No change
             return;
         }
@@ -169,6 +183,7 @@ public class PeerEurekaNodes {
         // Remove peers no long available
         List<PeerEurekaNode> newNodeList = new ArrayList<>(peerEurekaNodes);
 
+        // 循环需要下线的server,调用shutdown方法
         if (!toShutdown.isEmpty()) {
             logger.info("Removing no longer available peer nodes {}", toShutdown);
             int i = 0;
@@ -191,6 +206,7 @@ public class PeerEurekaNodes {
             }
         }
 
+        // 重新赋值 所有的注册的存货的服务实例信息保存到eurake 中
         this.peerEurekaNodes = newNodeList;
         this.peerEurekaNodeUrls = new HashSet<>(newPeerUrls);
     }

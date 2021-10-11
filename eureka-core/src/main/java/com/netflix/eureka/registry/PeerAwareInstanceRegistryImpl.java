@@ -134,10 +134,14 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     @Override
     public void init(PeerEurekaNodes peerEurekaNodes) throws Exception {
         this.numberOfReplicationsLastMin.start();
+        // eureka server
         this.peerEurekaNodes = peerEurekaNodes;
+
+        // 初始化缓存信息
         initializedResponseCache();
         // 调度定时更新 15 * 60 * 1000 每隔15分钟期望的心跳次数
         scheduleRenewalThresholdUpdateTask();
+
         initRemoteRegionRegistry();
 
         try {
@@ -418,6 +422,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     public boolean renew(final String appName, final String id, final boolean isReplication) {
         // 调用父类的续约方法
         if (super.renew(appName, id, isReplication)) {
+            // 同步给其他server isReplication = true
             replicateToPeers(Action.Heartbeat, appName, id, null, null, isReplication);
             return true;
         }
@@ -634,11 +639,13 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
                 return;
             }
 
+            // 循环所有的实例信息
             for (final PeerEurekaNode node : peerEurekaNodes.getPeerEurekaNodes()) {
                 // If the url represents this host, do not replicate to yourself.
                 if (peerEurekaNodes.isThisMyUrl(node.getServiceUrl())) {
                     continue;
                 }
+                // 将心跳数据同步给其他server
                 replicateInstanceActionsToPeers(action, appName, id, info, newStatus, node);
             }
         } finally {
@@ -649,7 +656,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     /**
      * Replicates all instance changes to peer eureka nodes except for
      * replication traffic to this node.
-     *
+     * 同步数据  服务下线，心跳 注册 状态更新 删除等都会同步给其他节点
      */
     private void replicateInstanceActionsToPeers(Action action, String appName,
                                                  String id, InstanceInfo info, InstanceStatus newStatus,
